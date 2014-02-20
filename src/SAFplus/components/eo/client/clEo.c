@@ -406,7 +406,7 @@ out:
 /*
  * This function initializes all the Basic ASP library 
  */
-static ClRcT clEoEssentialLibInitialize(void)
+ClRcT clEoEssentialLibInitialize(void)
 {
     ClRcT rc = CL_OK;
 
@@ -461,7 +461,7 @@ static ClRcT clEoEssentialLibFinalize(void)
     return CL_OK;
 }
 
-static ClRcT clAspBasicLibInitialize()
+ClRcT clAspBasicLibInitialize()
 {
     ClUint32T i = 0;
     ClRcT rc = CL_OK;
@@ -477,8 +477,6 @@ static ClRcT clAspBasicLibInitialize()
             if (CL_OK != (rc = gClBasicLibInitTable[i].fn()))
             {
 
-                clLog(CL_LOG_SEV_CRITICAL, CL_LOG_AREA, CL_LOG_CTXT_INI, "Failed to initialize basic library [%s], error [0x%x]",
-                      gClBasicLibInitTable[i].libName, rc);
                 return rc;
             }
         }

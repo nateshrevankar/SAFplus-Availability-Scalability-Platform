@@ -208,6 +208,22 @@ extern ClIocNodeAddressT gIocLocalBladeAddress;
 static ClIocAddressT allNodeReps;
 static ClIocLogicalAddressT allLocalComps;
 
+extern void clLoadEnvVars();
+extern void clDbgInitialize(void);
+extern ClRcT clEoGetConfig(ClCharT* compCfgFile);
+extern ClRcT clLogUtilLibInitialize(void);
+extern ClRcT clEoEssentialLibInitialize(void);
+extern ClRcT clAspBasicLibInitialize();
+extern ClRcT clAspClientLibInitialize(void);
+extern void eoProtoInit(void);
+extern ClRcT clEoTearDown(void);
+extern ClRcT clASPInitialize(void);
+
+/* To support : Multiple ASP initialization */
+//static ClUint32T gClCPMInitCount = 0;
+static ClBoolT gClCPMInitialized = CL_FALSE;
+
+
 /*
  * bypassed the function into extension plugin
  */
@@ -4272,7 +4288,7 @@ ClUint8T clEoClientLibs[] =
     CL_TRUE,    /* COR */
     CL_TRUE,   /* CM */
     CL_FALSE,   /* NS */
-    CL_FALSE,   /* Log */
+    CL_TRUE,   /* Log */
     CL_FALSE,   /* Trace */
     CL_FALSE,   /* Diagnostics */
     CL_FALSE,   /* Txn */
@@ -4357,14 +4373,187 @@ static void loadAspInstallInfo(void)
     snprintf(gAspInstallInfo, sizeof(gAspInstallInfo), "interface=%s:%s,version=%s,dir=%s", intf, gAspNodeIp, gAspVersion, aspDir);
 }
 
+ClRcT clCPM_Initialize(ClInt32T argc, ClCharT *argv[])
+{
+    ClRcT rc = CL_OK;
+    ClEoExecutionObjT *pThis = NULL;
+    ClTimerTimeOutT waitForExit = {0, 0};
+    clEoProgName = argv[0];
+    
+    clEoStaticQueueInit();
+    clLogDebug(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT,"clEoStaticQueueInit done");
+
+   if(CL_TRUE == gClCPMInitialized)
+    {
+        //gClCPMInitCount++;
+        clLogCritical(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Exiting : CPM already initialized");
+        return CL_OK;
+    }    
+
+    clLoadEnvVars();
+
+    clDbgInitialize();
+
+    eoProtoInit();
+
+    /*Get node representative if running without the damned CPM*/
+    clLogInfo(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "clEoWithOutCpm [%d] ", clEoWithOutCpm);    
+    if (clEoWithOutCpm == CL_TRUE) 
+    {
+        ClCharT *pNodeRepresetativeFlag = getenv("CL_NODE_REPRESENTATIVE");
+
+        if(pNodeRepresetativeFlag && !strcmp(pNodeRepresetativeFlag, "TRUE"))
+        {
+            clEoNodeRepresentativeDeclare(ASP_NODENAME);
+            unsetenv("CL_NODE_REPRESENTATIVE");
+        }
+    }
+
+    clLogInfo(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Reading configuration file");
+    
+    if(NULL != clEoProgName)
+    {
+        char componentCfg[CL_MAX_NAME_LENGTH];            
+        snprintf(componentCfg,CL_MAX_NAME_LENGTH,"%s_cfg.xml",clEoProgName);
+        rc = clEoGetConfig(componentCfg);
+    }
+    else
+    {
+        rc = clEoGetConfig(NULL);
+    }
+    if ( rc != CL_OK )
+    {
+        clLogCritical(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Failed to parse config file, error [0x%x]", rc);
+        return rc;
+    }
+    else
+    {
+        clLogDebug(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Parsed config file");
+    }
+
+    clLogInfo(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Initializing essential libraries...");
+    rc = clEoEssentialLibInitialize();
+    if (rc != CL_OK)
+    {
+        clLogCritical(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Failed to initialize all essential libraries, error [0x%x]", rc);
+        return rc;
+    }
+    else
+    {
+        clLogDebug(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Essential libraries initialized");
+    }
+
+    clLogUtilLibInitialize();
+    clLogDebug(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Log Util initialized");
+
+    clLogDebug(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Initializing basic libraries...");
+    rc = clAspBasicLibInitialize();
+    if (rc != CL_OK)
+    {
+        clLogCritical(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Failed to initialize all basic libraries, error [0x%x]", rc);
+        return rc;
+    }
+    else
+    {
+        clLogDebug(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Basic libraries initialized");
+    }
+
+    /* Initialize the signal Handler here */
+    clOsalSigHandlerInitialize();
+
+    if (ASP_COMPNAME == NULL)
+    {
+        if (clEoWithOutCpm == CL_TRUE)
+        {
+            clLogCritical(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "This is an EO running without the CPM.");
+        }
+        clLogCritical(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "The ASP_COMPNAME environment variable is not set.");
+        return CL_ERR_NULL_POINTER;
+    }
+ 
+    clEoStaticMutexInit();
+
+    rc = clEoCreate(&eoConfig, &pThis);
+    if (rc != CL_OK)
+    {
+        return rc;
+        clLogCritical(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Failed to create EO object ");
+    }
+    
+    clLogDebug(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Initializing client libraries...");
+    rc = clAspClientLibInitialize();
+    if (rc != CL_OK)
+    {
+        clLogCritical(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Failed to initialize all client libraries, error [0x%x]", rc);
+        return rc;
+    }
+    else
+    {
+        clLogDebug(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Client libraries initialized");
+    }
+
+    clLogInfo(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "All libraries initialized");
+
+    clCpmTargetInfoInitialize();
+
+    ///gClASPInitCount++;
+    gClCPMInitialized = CL_TRUE;
+
+    rc = clEoMyEoObjectGet(&pThis);
+    if(rc != CL_OK)
+    {
+        clLogCritical(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Exiting : EO my object get failed. error [%x0x].\n", rc);
+        exit(1);
+    }
+        
+    /* This should keep track of blocking APP initialize. */
+    clEoRefInc(pThis);
+
+    /* Call the application's initialize function */
+    rc = eoConfig.clEoCreateCallout(argc, argv);
+    if (rc != CL_OK)
+    {
+        clLogCritical(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Application initialization failed, error [0x%x]", rc);
+        exit(1);
+    }
+
+    if(eoConfig.appType == CL_EO_USE_THREAD_FOR_APP)
+    {
+        clEoUnblock(pThis);
+    }
+
+    /* We block on the exit path waiting for a terminate. */
+    clOsalMutexLock(&pThis->eoMutex);
+
+    while (pThis->refCnt > 0)
+    {
+        clOsalCondWait(&pThis->eoCond, &pThis->eoMutex, waitForExit);
+    }
+    clOsalMutexUnlock(&pThis->eoMutex);
+
+    clEoTearDown();
+    clLogInfo(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Process [%s] exited normally", argv[0]);
+
+    if (clDbgNoKillComponents)
+    {
+      clLogInfo(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT,
+            "In debug mode and 'clDbgNoKillComponents' is set, so this process will pause, not exit.");
+      while(1) sleep(10000); /* Using sleep here instead of Osal because Osal is likely shutdown */
+    }
+    
+    return CL_OK;
+}
+
+
 static ClRcT cpmMain(ClInt32T argc, ClCharT *argv[])
 {
     ClRcT rc = CL_OK;
     ClCharT cpmName[CL_MAX_NAME_LENGTH] = {0};
-    loadAspInstallInfo();
     clLogCompName = (ClCharT*) "AMF"; /* Override generated eo name with a short name for our server */
+
+    loadAspInstallInfo();
+
     clLogNotice(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "%s %s", CPM_ASP_WELCOME_MSG, gAspVersion);
-  
     clLogInfo(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Process [%s] started. PID [%d]", argv[0], (int)getpid());
   
     /* To make the AMF environment "look" like the rest of the components to our common libraries (like EO) we set a few
@@ -4372,13 +4561,10 @@ static ClRcT cpmMain(ClInt32T argc, ClCharT *argv[])
     
     sprintf(cpmName, "%s_%s", CL_CPM_COMPONENT_NAME, clCpmNodeName);
     setenv("ASP_COMPNAME", cpmName, 1);
-    /*
-     * The variable 'clCpmNodeName' should now be set.  We set the env var ASP_NODENAME so that log library can pick it up.
-     */
+
+    /*The variable 'clCpmNodeName' should now be set.  We set the env var ASP_NODENAME so that log library can pick it up */
     setenv("ASP_NODENAME", clCpmNodeName, 1);
-    /*
-     * Set the IOC address for this node.
-     */
+    /* Set the IOC address for this node */
     CL_CPM_IOC_ADDRESS_GET(myCh, mySl, ASP_NODEADDR);
 
     if (1)
@@ -4388,10 +4574,11 @@ static ClRcT cpmMain(ClInt32T argc, ClCharT *argv[])
         setenv("ASP_NODEADDR", iocAddress, 1);
     }
 
-    /* For now variable was set as optional but would be good if it was set   setenv("ASP_APP_BINDIR", temp, 1); */
+    /* For now variable was set as optional but would be good if it was set setenv("ASP_APP_BINDIR", temp, 1); */
     clEoNodeRepresentativeDeclare(clCpmNodeName);
-    clAppConfigure(&clEoConfig,clEoBasicLibs,clEoClientLibs);
-    rc = clEoInitialize(argc, argv);
+    clAppConfigure(&clEoConfig,clEoBasicLibs,clEoClientLibs); 
+
+    clCPM_Initialize(argc, argv);
     if (CL_OK != rc)
     {
         clLogDebug(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Process [%s] exited abnormally. Exit code [%u/0x%x]", argv[0], rc, rc);
@@ -4399,10 +4586,9 @@ static ClRcT cpmMain(ClInt32T argc, ClCharT *argv[])
     }
     
     clLogInfo(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Process [%s] exited normally", argv[0]);
-
     return CL_OK;
 
- failure:
+failure:
     return rc;
 }
 
@@ -4427,11 +4613,9 @@ failure:
 }
 
 #ifndef VXWORKS_BUILD
-
 ClInt32T main(ClInt32T argc, ClCharT *argv[], ClCharT *envp[])
 {
     ClRcT rc = CL_OK;
-
 #ifdef QNX_BUILD
     gEnvp = envp;
 #endif
@@ -4439,66 +4623,34 @@ ClInt32T main(ClInt32T argc, ClCharT *argv[], ClCharT *envp[])
     rc = cpmValidateEnv();
     if (CL_OK != rc)
     {
-        clLogDebug(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Validation of CPM environment failed, error [%#x]",
-                   rc);
+        clLogCritical(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Validation of CPM environment failed, error [%#x]", rc);
         return rc;
     }
+    else
+        clLogDebug(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Validation completed for CPM environment setting");
+
     rc = clCpmParseCmdLine(argc, argv);
     if (rc != CL_OK)
     {
         clLogCritical(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Wrong command line arguments, error [%#x]", rc);
         return rc;
     }
+    else
+        clLogDebug(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Command for starting AMF completed");
+
     clAmsSetInstantiateCommand(argc, argv);
 
-    /*
-     * The variable 'clCpmNodeName' should now be set.  We set the env
-     * var ASP_NODENAME so that log library can pick it up.
+    /* The variable 'clCpmNodeName' should now be set.  
+     * We set the env var ASP_NODENAME so that log library can pick it up.
      */
     setenv("ASP_NODENAME", clCpmNodeName, 1);
 
     /* Code was changed so the startup script daemonizes the watchdog.  So it is unnecessary for AMF to do so */
-    cpmIsForeground = 1;
-    
-    if (1) // (cpmIsForeground)
+    rc = cpmMain(argc, argv);
+    if (CL_OK != rc)
     {
-        rc = cpmMain(argc, argv);
-        if (CL_OK != rc)
-        {
-            clLogCritical(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Main function of CPM failed, error [%#x]", rc);
-        }
+        clLogCritical(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Main function of CPM failed, error [%#x]", rc);
     }
-#if 0    
-    else
-    {
-    ClInt32T pid = 0;
-        
-        pid = fork();
-        if (0 == pid)
-        {
-#ifdef QNX_BUILD
-            procmgr_daemon(EXIT_SUCCESS, (PROCMGR_DAEMON_NOCHDIR | PROCMGR_DAEMON_NOCLOSE | PROCMGR_DAEMON_NODEVNULL));
-#else
-            cpmDaemonize_step1();
-#endif
-            cpmDaemonize_step2();
-            rc = cpmMain(argc, argv);
-            if (CL_OK != rc)
-            {
-                clLogCritical(CPM_LOG_AREA_CPM, CPM_LOG_CTX_CPM_BOOT, "Main function of CPM failed, error [%#x]", rc);
-            }
-        }
-        else if (0 < pid)
-        {
-              exit(0);
-        }
-        else
-        {
-            perror("Unable to fork");
-            rc = CL_CPM_RC(CL_OSAL_ERR_OS_ERROR);
-        }
-    }
-#endif
     return rc;
 }
 
